@@ -660,6 +660,121 @@ class Runtime:
         finally:self.analytics.close()
 
 
+class MultiPhoneRuntime(Runtime):
+    """Independent per-device state and strict per-call routing.
+
+    Device selection is deliberately not global: an unrelated chat cannot
+    redirect a later command that omitted the device argument.
+    """
+
+    ALIAS=re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}\Z")
+
+    def __init__(self,state_dir=None,base_url=None):
+        super().__init__(state_dir,base_url)
+        self._contexts={"default":self}
+        self._contexts_lock=threading.RLock()
+        self._devices=self.state_dir/"devices"
+        self._devices.mkdir(mode=0o700,parents=True,exist_ok=True)
+        self._devices.chmod(0o700)
+
+    def _path(self,name):
+        if not isinstance(name,str) or name=="default" or self.ALIAS.fullmatch(name) is None:
+            raise WDAError("invalid_argument","Invalid device alias; use letters, digits, underscore or hyphen, not a path.",details={"action_executed":False})
+        directory=self._devices/name
+        if directory.is_symlink():
+            raise WDAError("invalid_argument","Device directories must not be symlinks.",details={"action_executed":False})
+        return directory
+
+    def _configs(self):
+        configs=[]
+        legacy=self.setup_manager.config
+        if legacy:configs.append(("default",legacy))
+        for path in self._devices.iterdir():
+            if path.is_symlink() or not path.is_dir() or self.ALIAS.fullmatch(path.name) is None:continue
+            config=path/"config.json"
+            if config.is_symlink() or not config.is_file():continue
+            try:
+                value=json.loads(config.read_text())
+                if isinstance(value,dict) and value.get("udid"):configs.append((path.name,value))
+            except (ValueError,OSError):pass
+        return sorted(configs)
+
+    def device(self,args):
+        validate(args,SCHEMAS["device"])
+        if args["action"]=="list":
+            if set(args)!={"action"}:
+                raise WDAError("invalid_argument","list accepts only action.",details={"action_executed":False})
+            return {"ok":True,"default":"default","devices":[{"device":name,"local_port":config.get("local_port")} for name,config in self._configs()]}
+        required={"action","device","udid","team_id","bundle_id","local_port"}
+        if args["action"]!="register" or not required.issubset(args):
+            raise WDAError("invalid_argument","register needs device, udid, team_id, bundle_id and local_port.",details={"action_executed":False})
+        name=args["device"]
+        directory=self._path(name)
+        lock=self.state_dir/".device-registry.lock"
+        with lock.open("a") as handle:
+            lock.chmod(0o600)
+            fcntl.flock(handle,fcntl.LOCK_EX)
+            if (directory/"config.json").exists():
+                raise WDAError("device_exists","Device alias is already registered. Existing configuration was preserved.",details={"action_executed":False})
+            for alias,config in self._configs():
+                if config.get("udid")==args["udid"]:
+                    raise WDAError("device_exists","This UDID belongs to "+alias+".",details={"action_executed":False})
+                if config.get("local_port")==args["local_port"]:
+                    raise WDAError("port_in_use","Local port belongs to "+alias+".",details={"action_executed":False})
+            from urllib.parse import urlsplit
+            if args["local_port"]==(urlsplit(self.base_url).port or 18100):
+                raise WDAError("port_in_use","Local port is reserved for the default phone.",details={"action_executed":False})
+            manager=SetupManager(directory,"http://127.0.0.1:"+str(args["local_port"]))
+            config={k:args[k] for k in ("udid","team_id","bundle_id","local_port","device_port","source_dir") if k in args}
+            result=manager.setup("configure",**config)
+            if not result.get("ok"):
+                raise WDAError("invalid_argument",str(result.get("error","Configuration failed.")),details={"action_executed":False})
+        return {"ok":True,"device":name,"local_port":args["local_port"],
+                "next_step":"Use pua_setup(action=fetch/build/start,device="+name+"), then pua_ready(device="+name+")."}
+
+    def _context(self,name):
+        if name=="default":return self
+        directory=self._path(name)
+        if not (directory/"config.json").is_file():
+            raise WDAError("unknown_device","Unknown device; use pua_device(action=list) and register first.",details={"action_executed":False})
+        with self._contexts_lock:
+            result=self._contexts.get(name)
+            if result is None:
+                result=Runtime(directory)
+                self._contexts[name]=result
+            return result
+
+    def lane(self,name,args):
+        if name=="pua_device":return "__registry__"
+        if not isinstance(args,dict):return "__invalid__"
+        alias=args.get("device","default")
+        if alias=="default":return alias
+        try:directory=self._path(alias)
+        except WDAError:return "__invalid__"
+        return alias if (directory/"config.json").is_file() else "__invalid__"
+
+    def call(self,name,args):
+        if name=="pua_device":return self.device(args)
+        if not isinstance(name,str) or not name.startswith("pua_") or name[4:] not in SCHEMAS:
+            raise WDAError("unknown_tool","Unknown PUA tool.")
+        validate(args,SCHEMAS[name[4:]])
+        alias=args.get("device","default")
+        if name in ("pua_screen","pua_screen_frame","pua_screen_action") and alias!="default":
+            raise WDAError("preview_not_supported","The live preview widget is currently bound to the default phone. Control and observe other phones with device=alias.",details={"action_executed":False})
+        clean={key:value for key,value in args.items() if key!="device"}
+        if alias=="default":return super().call(name,clean)
+        return self._context(alias).call(name,clean)
+
+    def preview_enabled(self,args):
+        return isinstance(args,dict) and args.get("device","default")=="default"
+
+    def close(self):
+        with self._contexts_lock:
+            others=[item for key,item in self._contexts.items() if key!="default"]
+        for item in others:item.close()
+        super().close()
+
+
 def result_content(data,structured=False):
     """One compact JSON text block, plus the screenshot when the result carries one.
 
