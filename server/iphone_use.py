@@ -838,18 +838,27 @@ def serve(runtime):
     def send(response):
         line=json.dumps(response,ensure_ascii=False,allow_nan=False)
         with writing:print(line,flush=True)
-    jobs=queue.Queue()
-    def work():
-        while True:
-            job=jobs.get()
-            if job is None:return
-            ident,params,arrived=job
-            result=tool_result(runtime,params)
-            runtime.note_response(params.get("name"),result,arrived)
-            send({"jsonrpc":"2.0","id":ident,"result":result})
-            runtime.replied()
-    worker=threading.Thread(target=work,name="wda-tools",daemon=True)
-    worker.start()
+    lanes={}
+    lanes_lock=threading.Lock()
+    def enqueue(job):
+        ident,params,arrived=job
+        key=runtime.lane(params.get("name"),params.get("arguments",{})) if hasattr(runtime,"lane") else "default"
+        with lanes_lock:
+            if key not in lanes:
+                pending=queue.Queue()
+                def work(current=pending):
+                    while True:
+                        entry=current.get()
+                        if entry is None:return
+                        ident,params,arrived=entry
+                        result=tool_result(runtime,params)
+                        runtime.note_response(params.get("name"),result,arrived)
+                        send({"jsonrpc":"2.0","id":ident,"result":result})
+                        runtime.replied()
+                worker=threading.Thread(target=work,name="wda-tools-"+key[:32],daemon=True)
+                lanes[key]=(pending,worker)
+                worker.start()
+            lanes[key][0].put(job)
     # Pointer gestures must not block frame polling. Refuse a second gesture instead of
     # queueing input against a screen that may have changed in the meantime.
     screen_gate=threading.Lock()
@@ -886,7 +895,7 @@ def serve(runtime):
                 elif method=="tools/call":
                     arrived=time.monotonic()
                     if params.get("name") not in ("pua_screen_frame","pua_screen","pua_screen_action"):
-                        jobs.put((ident,params,arrived));continue
+                        enqueue((ident,params,arrived));continue
                     if params.get("name")=="pua_screen_action" and isinstance(params.get("arguments"),dict) and params["arguments"].get("action") in ("tap","drag","viewport"):
                         if screen_gate.acquire(blocking=False):
                             screen_worker=threading.Thread(target=screen_work,args=(ident,params),name="wda-screen-action",daemon=True)
@@ -905,7 +914,10 @@ def serve(runtime):
             send(response)
     finally:
         # Finish the phone operation already accepted, then stop: its outcome must be reported.
-        jobs.put(None);worker.join()
+        with lanes_lock:
+            active=list(lanes.values())
+            for pending,worker in active:pending.put(None)
+        for pending,worker in active:worker.join()
         if screen_worker is not None:screen_worker.join()
 
 
