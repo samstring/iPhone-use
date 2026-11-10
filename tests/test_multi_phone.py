@@ -123,5 +123,20 @@ class MultiPhoneTests(unittest.TestCase):
         self.assertTrue(all(not item["result"]["isError"] for item in answers))
 
 
+    def test_simulator_registration_without_signing_and_independent_ports(self):
+        first=self.runtime.call("pua_device",{
+            "action":"register","device":"sim_a","device_type":"simulator",
+            "udid":"ABCD1234-1234-5678-ABCD-123456789012","local_port":18201})
+        second=self.runtime.call("pua_device",{
+            "action":"register","device":"sim_b","device_type":"simulator",
+            "udid":"DCBA1234-1234-5678-ABCD-123456789012","local_port":18202})
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(self.runtime._context("sim_a").setup_manager.config["device_type"],"simulator")
+        self.assertEqual(self.runtime._context("sim_a").base_url,"http://127.0.0.1:18201")
+        self.assertEqual(self.runtime._context("sim_b").base_url,"http://127.0.0.1:18202")
+        self.assertEqual({v["device_type"] for v in self.runtime.call("pua_device",{"action":"list"})["devices"]},{"simulator"})
+
+
 if __name__=="__main__":
     unittest.main()

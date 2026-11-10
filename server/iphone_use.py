@@ -88,7 +88,7 @@ SCHEMAS={
  "collect_list":obj({"row_type":string(),"max_pages":num(1,10,"integer"),"end_selector":SEL}),
  "apps":obj({"query":string(max_length=100),"country":string(max_length=2),"source":string(enum=["auto","catalog","installed","apple"]),"limit":num(1,30,"integer")},("query",)),
  "doctor":obj({}),"ready":obj({"screenshot":{"type":"boolean","default":True,"description":"Also verify screenshot; false retains status/session/source/viewport/unlock checks."},"recover":{"type":"boolean","default":True,"description":"Normal task startup: omit or set true, so a persistent local.pid/XCTest fault can queue one bounded restart of a proven owned PUA. Use false only for an explicitly requested diagnostic/no-restart check, not a routine precheck. False is respected and returns ready=false, state=recovery_required when restart is needed; queued recovery returns state=recovering. Neither state proves readiness."}}),"metrics":obj({"reset":{"type":"boolean","default":False,"description":"Return the totals, then start a new measurement window."}}),
- "setup":obj({"action":string(enum=["discover","fetch","configure","build","start","stop","status"]),"udid":string(),"team_id":string(),"bundle_id":string(),"source_dir":string(max_length=4096),"local_port":num(1024,65535,"integer"),"device_port":num(1024,65535,"integer"),"job_id":string(),"wait_seconds":{**num(0,30),"description":"Bounded wait for this job: start defaults to 20 seconds, status to 0. Use status with job_id and 20 to await an active start/recovery. Timeout keeps the job running; do not start again."}},("action",))
+ "setup":obj({"action":string(enum=["discover","fetch","configure","build","start","stop","status"]),"udid":string(),"team_id":string(),"bundle_id":string(),"device_type":string(enum=["physical","simulator"]),"source_dir":string(max_length=4096),"local_port":num(1024,65535,"integer"),"device_port":num(1024,65535,"integer"),"job_id":string(),"wait_seconds":{**num(0,30),"description":"Bounded wait for this job: start defaults to 20 seconds, status to 0. Use status with job_id and 20 to await an active start/recovery. Timeout keeps the job running; do not start again."}},("action",))
 }
 # Each batch operation carries the same closed argument schema as its standalone tool.
 BATCH_OPS=["tap","swipe","type_text","launch_app","press_button","wait","observe","scroll_find"]
@@ -102,7 +102,8 @@ SCHEMAS["device"]=obj({
  "device":string("Unique device alias.",max_length=32),
  "udid":string(max_length=64),"team_id":string(max_length=10),
  "bundle_id":string(max_length=160),"local_port":num(1024,65535,"integer"),
- "device_port":num(1024,65535,"integer"),"source_dir":string(max_length=4096)
+ "device_port":num(1024,65535,"integer"),"source_dir":string(max_length=4096),
+ "device_type":string("Physical USB phone or Simulator.",enum=["physical","simulator"])
 },("action",))
 DEVICE_ARG=string("Configured device alias; omit for legacy default phone.",max_length=32)
 SCHEMAS["ready"]["examples"]=[{"recover":True,"screenshot":False}]
@@ -710,10 +711,13 @@ class MultiPhoneRuntime(Runtime):
         if args["action"]=="list":
             if set(args)!={"action"}:
                 raise WDAError("invalid_argument","list accepts only action.",details={"action_executed":False})
-            return {"ok":True,"default":"default","devices":[{"device":name,"local_port":config.get("local_port")} for name,config in self._configs()]}
-        required={"action","device","udid","team_id","bundle_id","local_port"}
+            return {"ok":True,"default":"default","devices":[{"device":name,"local_port":config.get("local_port"),"device_type":config.get("device_type","physical")} for name,config in self._configs()]}
+        kind=args.get("device_type","physical")
+        required={"action","device","udid","local_port"}
+        if kind=="physical":
+            required.update(("team_id","bundle_id"))
         if args["action"]!="register" or not required.issubset(args):
-            raise WDAError("invalid_argument","register needs device, udid, team_id, bundle_id and local_port.",details={"action_executed":False})
+            raise WDAError("invalid_argument","register needs device, udid and local_port; physical devices also require team_id and bundle_id.",details={"action_executed":False})
         name=args["device"]
         directory=self._path(name)
         lock=self.state_dir/".device-registry.lock"
@@ -732,6 +736,7 @@ class MultiPhoneRuntime(Runtime):
                 raise WDAError("port_in_use","Local port is reserved for the default phone.",details={"action_executed":False})
             manager=SetupManager(directory,"http://127.0.0.1:"+str(args["local_port"]))
             config={k:args[k] for k in ("udid","team_id","bundle_id","local_port","device_port","source_dir") if k in args}
+            config["device_type"]=kind
             result=manager.setup("configure",**config)
             if not result.get("ok"):
                 raise WDAError("invalid_argument",str(result.get("error","Configuration failed.")),details={"action_executed":False})

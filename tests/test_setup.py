@@ -689,5 +689,48 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn("recovery_target", self.manager._job_status(stored))
 
 
+    def test_simulator_discovery_filters_and_reports_boot_state(self):
+        document={"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-3":[
+            {"udid":"SIM-A-00000001","name":"CI custom simulator","deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro","state":"Booted","isAvailable":True},
+            {"udid":"SIM-B-00000002","name":"iPhone 17","state":"Shutdown","isAvailable":False},
+            {"udid":"TV-00000003","name":"Apple TV","state":"Booted","isAvailable":True}]}}
+        parsed=self.manager.parse_simulators(document)
+        self.assertEqual(len(parsed),1)
+        self.assertEqual(parsed[0]["udid"],"SIM-A-00000001")
+        self.assertEqual(parsed[0]["device_type"],"simulator")
+        self.assertEqual(parsed[0]["ios_version"],"26.3")
+        self.assertEqual(parsed[0]["connection_state"],"Booted")
+
+    def test_simulator_can_configure_without_signing_and_uses_host_port(self):
+        udid="ABCD1234-1234-5678-ABCD-123456789012"
+        result=self.manager.setup("configure",udid=udid,device_type="simulator")
+        self.assertTrue(result["ok"],result)
+        config=result["config"]
+        self.assertIsNone(config["team_id"])
+        self.assertEqual(config["device_port"],18100)
+        self.assertEqual(config["device_type"],"simulator")
+        command=self.manager._build_command(config,"test-without-building")
+        self.assertIn("platform=iOS Simulator,id="+udid,command)
+        self.assertIn("CODE_SIGNING_ALLOWED=NO",command)
+        self.assertIn("USE_PORT=18100",command)
+        self.assertNotIn("-allowProvisioningUpdates",command)
+        self.assertFalse(self.manager.setup("configure",udid=udid,device_type="simulator",device_port=8100)["ok"])
+
+    def test_simulator_start_skips_usb_deps_but_requires_booted_simulator(self):
+        udid="ABCD1234-1234-5678-ABCD-123456789012"
+        self.manager.setup("configure",udid=udid,device_type="simulator")
+        with patch.object(self.manager,"_source",return_value=Path(self.temp.name)), \
+             patch.object(self.manager,"_simulator_booted") as booted, \
+             patch.object(self.manager,"_probe_status",return_value={"ready":False}), \
+             patch.object(self.manager,"_require_build"), \
+             patch.object(self.manager,"_create_job",return_value={"ok":True,"job_id":"test"}) as create, \
+             patch.object(wda_setup.sys,"platform","darwin"), \
+             patch.object(wda_setup.shutil,"which",side_effect=lambda x:"/usr/bin/xcodebuild" if x=="xcodebuild" else None):
+            result=self.manager.setup("start",wait_seconds=0)
+        self.assertTrue(result["ok"],result)
+        booted.assert_called_once_with(udid)
+        create.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

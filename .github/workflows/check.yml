@@ -15,3 +15,16 @@ jobs:
       - run: npm run build --prefix ui
       - run: git diff --exit-code -- assets/phone-screen.html
       - run: sh scripts/check.sh
+
+  simulator-integration:
+    name: Two simulator WDA integration
+    if: github.ref == 'refs/heads/feature/multi_phone' || github.event_name == 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: xcodebuild -version
+      - run: python3 scripts/simulator_ci.py

@@ -164,16 +164,24 @@ class SetupManager:
             yield
 
     def _validate_config(self, config):
-        for key, pattern in (("udid", r"[A-Za-z0-9-]{8,64}"), ("team_id", r"[A-Z0-9]{10}"),
-                             ("bundle_id", r"[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+){2,}")):
+        kind = config.get("device_type", "physical")
+        if kind not in ("physical", "simulator"):
+            raise ValueError("device_type must be physical or simulator.")
+        fields = [("udid", r"[A-Za-z0-9-]{8,64}"),
+                  ("bundle_id", r"[A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+){2,}")]
+        if kind == "physical" or config.get("team_id") is not None:
+            fields.append(("team_id", r"[A-Z0-9]{10}"))
+        for key, pattern in fields:
             if not isinstance(config.get(key), str) or not re.fullmatch(pattern, config[key]):
-                raise ValueError(f"Provide an explicit valid {key}; Apple team IDs are 10 uppercase letters/digits and bundle IDs use reverse-DNS form.")
+                raise ValueError(f"Provide a valid {key} for this {kind} device.")
         for key in ("local_port", "device_port"):
             value = config.get(key)
             if isinstance(value, bool) or not isinstance(value, int) or not 1024 <= value <= 65535:
                 raise ValueError(f"{key} must be an integer between 1024 and 65535.")
         if config["local_port"] != self.port:
             raise ValueError(f"local_port must match the MCP base URL port ({self.port}); update the plugin URL and restart MCP to change ports.")
+        if kind == "simulator" and config["device_port"] != config["local_port"]:
+            raise ValueError("Simulator WDA shares host networking; device_port must match local_port.")
         return config
 
     def _source(self, config):
@@ -215,6 +223,33 @@ class SetupManager:
                            "developer_mode": developer, "unlocked": "user_check_required"})
         return result
 
+    @staticmethod
+    def parse_simulators(document):
+        devices = []
+        for runtime, entries in document.get("devices", {}).items():
+            for item in entries:
+                device_type = item.get("deviceTypeIdentifier", "")
+                is_phone = (".iPhone-" in device_type or ".iPad-" in device_type
+                            or (not device_type and item.get("name", "").startswith(("iPhone", "iPad"))))
+                if not item.get("isAvailable", True) or not is_phone:
+                    continue
+                devices.append({"udid": item["udid"], "name": item["name"],
+                                "model": item["name"], "device_type": "simulator",
+                                "ios_version": runtime.split("iOS-")[-1].replace("-", "."),
+                                "connection_state": item.get("state", "unknown"),
+                                "pairing_state": "not_required",
+                                "developer_mode": "not_required",
+                                "unlocked": "user_check_required"})
+        return devices
+
+    def _simulator_booted(self, udid):
+        found = _run(["xcrun", "simctl", "list", "devices", "available", "--json"], timeout=35)
+        if not found["ok"]:
+            raise ValueError("Cannot check simulator state: " + found["stderr"])
+        matches = [item for item in self.parse_simulators(json.loads(found["stdout"])) if item["udid"] == udid]
+        if not matches or matches[0]["connection_state"] != "Booted":
+            raise ValueError("The selected simulator is not booted; run xcrun simctl boot and bootstatus first.")
+
     def discover(self):
         fd, name = tempfile.mkstemp(prefix="devices-", suffix=".json", dir=self.state_dir)
         os.close(fd)
@@ -232,6 +267,14 @@ class SetupManager:
                                if not item.get("simulator") and item.get("platform") == "com.apple.platform.iphoneos"]
                 except (ValueError, TypeError, KeyError):
                     pass
+            simulated = _run(["xcrun", "simctl", "list", "devices", "available", "--json"], timeout=35)
+            if simulated["ok"]:
+                try:
+                    devices.extend(self.parse_simulators(json.loads(simulated["stdout"])))
+                except (ValueError, TypeError, KeyError):
+                    pass
+            for device in devices:
+                device.setdefault("device_type", "physical")
             return {"ok": bool(document) or bool(devices), "devices": devices,
                     "selected_udid": self.config.get("udid"), "error": probe["stderr"] if not probe["ok"] else None,
                     "next_steps": [] if devices else ["Connect iPhone by USB, unlock it, accept Trust This Computer yourself and open Xcode Devices and Simulators."]}
@@ -265,12 +308,14 @@ class SetupManager:
         discovery = self.discover() if xcode["ok"] else {"devices": [], "ok": False}
         config = self.config
         chosen = next((device for device in discovery["devices"] if device.get("udid") == config.get("udid")), None)
+        is_simulator = config.get("device_type") == "simulator"
         checks = {"macos": sys.platform == "darwin", "full_xcode": xcode["ok"],
-                  "git": bool(binaries["git"]), "node": _node_supported(node_version),
-                  "npm": bool(re.match(r"^(1[0-9]|[2-9][0-9])\.", npm_version)),
+                  "git": bool(binaries["git"]),
+                  "node": is_simulator or _node_supported(node_version),
+                  "npm": is_simulator or bool(re.match(r"^(1[0-9]|[2-9][0-9])\.", npm_version)),
                   "configured": bool(config), "selected_device_present": bool(chosen),
-                  "paired": chosen.get("pairing_state") == "paired" if chosen else False,
-                  "developer_mode": chosen.get("developer_mode") == "enabled" if chosen else False}
+                  "paired": bool(chosen) if is_simulator else chosen.get("pairing_state") == "paired" if chosen else False,
+                  "developer_mode": bool(chosen) if is_simulator else chosen.get("developer_mode") == "enabled" if chosen else False}
         try:
             self._validate_config(config)
             source = self._source(config)
@@ -287,19 +332,22 @@ class SetupManager:
             next_steps.append("Discover the device, then configure its explicit UDID, your Apple Team ID and a unique reverse-DNS bundle ID.")
         if config and not chosen:
             next_steps.append("Reconnect the selected iPhone by USB and confirm its UDID in Xcode Devices and Simulators.")
-        if not checks["paired"]:
+        if is_simulator and chosen and chosen.get("connection_state") != "Booted":
+            next_steps.append("Boot the simulator with simctl boot and bootstatus before starting WDA.")
+        if not is_simulator and not checks["paired"]:
             next_steps.append("Unlock the iPhone and accept Trust This Computer yourself; verify pairing in Xcode.")
-        if not checks["developer_mode"]:
+        if not is_simulator and not checks["developer_mode"]:
             next_steps.append("Enable iPhone Settings > Privacy & Security > Developer Mode, restart and confirm it yourself.")
         if not checks["pinned_source"]:
             next_steps.append("Run fetch for the isolated pinned Appium WDA source, or reuse an unchanged checkout at the pinned commit.")
-        next_steps.extend(["In Xcode Settings > Accounts, sign in yourself and select your signing team; do not share passwords or verification codes.",
-                           "Keep the phone unlocked and awake. Enable Settings > Developer > Enable UI Automation; trust the development certificate in VPN & Device Management if iOS requests it."])
+        if not is_simulator:
+            next_steps.extend(["In Xcode Settings > Accounts, sign in yourself and select your signing team; do not share passwords or verification codes.",
+                               "Keep the phone unlocked and awake. Enable Settings > Developer > Enable UI Automation; trust the development certificate in VPN & Device Management if iOS requests it."])
         live = self._probe_status()
-        profile = self._profile_status()
+        profile = {"known": False, "note": "Simulator does not require a provisioning profile."} if is_simulator else self._profile_status()
         if profile.get("expired"):
             next_steps.append("The built provisioning profile has expired. Refresh your Xcode signing account and build again before start.")
-        mirroring = self.mirroring_running()
+        mirroring = False if is_simulator else self.mirroring_running()
         if mirroring:
             next_steps.append("Quit iPhone Mirroring if the phone shows the Mac-in-use lock screen or WDA has an empty accessibility tree, then verify READY again.")
         return {"ok": all(checks.values()), "checks": checks, "devices": discovery["devices"],
@@ -586,11 +634,17 @@ class SetupManager:
         return {"ok": job["state"] != "failed", "job_id": job_id, "job": self._job_status(job), "next_step": "Poll setup status with this job_id; do not block MCP waiting for Xcode."}
 
     def _build_command(self, config, action):
-        return ["xcodebuild", "-project", str(Path(config["source_dir"]) / "WebDriverAgent.xcodeproj"),
-                "-scheme", "WebDriverAgentRunner", "-configuration", "Debug", "-destination", "id=" + config["udid"],
-                "-derivedDataPath", str(self.state_dir / "derived_data"), "-allowProvisioningUpdates",
-                "DEVELOPMENT_TEAM=" + config["team_id"], "CODE_SIGN_STYLE=Automatic", "CODE_SIGN_IDENTITY=Apple Development",
-                "PRODUCT_BUNDLE_IDENTIFIER=" + config["bundle_id"], "USE_PORT=" + str(config["device_port"]), action]
+        kind = config.get("device_type", "physical")
+        base = ["xcodebuild", "-project", str(Path(config["source_dir"]) / "WebDriverAgent.xcodeproj"),
+                "-scheme", "WebDriverAgentRunner", "-configuration", "Debug", "-destination",
+                ("platform=iOS Simulator,id=" if kind == "simulator" else "id=") + config["udid"],
+                "-derivedDataPath", str(self.state_dir / "derived_data"), "-parallel-testing-enabled", "NO"]
+        if kind == "simulator":
+            return base + ["CODE_SIGNING_ALLOWED=NO", "USE_PORT=" + str(config["local_port"]), action]
+        return base + ["-allowProvisioningUpdates", "DEVELOPMENT_TEAM=" + config["team_id"],
+                       "CODE_SIGN_STYLE=Automatic", "CODE_SIGN_IDENTITY=Apple Development",
+                       "PRODUCT_BUNDLE_IDENTIFIER=" + config["bundle_id"],
+                       "USE_PORT=" + str(config["device_port"]), action]
 
     def setup(self, action, **args):
         wait_seconds = args.pop("wait_seconds", 20 if action == "start" else 0)
@@ -674,17 +728,24 @@ class SetupManager:
                 if action == "configure":
                     if any(job.get("state") in ACTIVE_STATES and self._owned(job) for job in self._jobs()):
                         raise ValueError("Stop the owned job before changing its configuration.")
-                    allowed_args = {"udid", "team_id", "bundle_id", "source_dir", "local_port", "device_port"}
+                    allowed_args = {"udid", "team_id", "bundle_id", "source_dir", "local_port", "device_port", "device_type"}
                     if set(args) - allowed_args:
                         raise ValueError("Unknown configure arguments: " + ", ".join(sorted(set(args) - allowed_args)))
-                    config = {"udid": args.get("udid"), "team_id": args.get("team_id"), "bundle_id": args.get("bundle_id"),
+                    kind = args.get("device_type", self.config.get("device_type", "physical"))
+                    local_port = args.get("local_port", self.port)
+                    config = {"udid": args.get("udid"), "team_id": args.get("team_id"),
+                              "bundle_id": args.get("bundle_id") or ("com.iphoneuse.wdarunner" if kind == "simulator" else None),
+                              "device_type": kind,
                               "source_dir": str(Path(args.get("source_dir") or self.state_dir / "runtime/WebDriverAgent").expanduser().resolve()),
-                              "local_port": args.get("local_port", self.port), "device_port": args.get("device_port", 8100)}
+                              "local_port": local_port,
+                              "device_port": args.get("device_port", local_port if kind == "simulator" else 8100)}
                     self._validate_config(config)
                     if args.get("source_dir"):
                         self._source(config)
                     _write_json(self.state_dir / "config.json", config)
-                    return {"ok": True, "config": config, "next_step": "Run fetch if source is missing, then build. Xcode handles Apple signing with your existing account."}
+                    note = ("Boot the simulator, then build/start WDA without signing." if kind == "simulator"
+                            else "Xcode handles Apple signing with your existing account.")
+                    return {"ok": True, "config": config, "next_step": "Run fetch if source is missing, then build. " + note}
                 if args:
                     raise ValueError(f"{action} takes no arguments; use configure first.")
                 config = self.config
@@ -696,15 +757,18 @@ class SetupManager:
                 if sys.platform != "darwin" or not shutil.which("xcodebuild"):
                     raise ValueError("Building and starting WDA requires macOS with full Xcode.")
                 if action == "start":
+                    if config.get("device_type") == "simulator":
+                        self._simulator_booted(config["udid"])
                     healthy = self._probe_status()
                     if healthy["ready"]:
                         return {"ok": True, "already_ready": True, "service": healthy,
                                 "note": "Reusing reachable WDA. This plugin does not own or stop that external service."}
                     self._require_build(config)
-                    if not shutil.which("node") or not shutil.which("npm"):
-                        raise ValueError("Install supported Node.js and npm for the USB forward.")
-                    if not _node_supported(_run(["node", "--version"])["stdout"]):
-                        raise ValueError("USB forwarding requires Node.js 20.19+ / 22.12+ / 24+; update Node.js before start.")
+                    if config.get("device_type", "physical") == "physical":
+                        if not shutil.which("node") or not shutil.which("npm"):
+                            raise ValueError("Install supported Node.js and npm for the USB forward.")
+                        if not _node_supported(_run(["node", "--version"])["stdout"]):
+                            raise ValueError("USB forwarding requires Node.js 20.19+ / 22.12+ / 24+; update Node.js before start.")
                     with socket.socket() as probe:
                         # Node listeners use address reuse. A recently stopped
                         # owned forward can leave connections in TIME_WAIT;
@@ -738,9 +802,9 @@ def _worker(state_dir, job_id, owner_token, base_url):
     log_lock = threading.Lock()
     stopping = False
 
-    def launch(argv, cwd=None):
+    def launch(argv, cwd=None, env=None):
         """Redact command output before it reaches the private on-disk log."""
-        child = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL,
+        child = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, env=env,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, errors="replace", bufsize=1)
         children.append(child)
@@ -820,23 +884,28 @@ def _worker(state_dir, job_id, owner_token, base_url):
                     manager._stop_recovery_target(job)
                     job["recovery_phase"] = "starting"
                     _write_json(path, job)
-                forward = manager.state_dir / "runtime/forward"
-                forward.mkdir(exist_ok=True, mode=0o700)
-                for name in ("package.json", "package-lock.json", "forward.mjs"):
-                    shutil.copyfile(PLUGIN_ROOT / "tooling" / name, forward / name)
-                    (forward / name).chmod(0o600)
-                lock_hash = hashlib.sha256((forward / "package-lock.json").read_bytes()).hexdigest()
-                if _read_json(forward / "installed.json", {}).get("lock_hash") != lock_hash or not (forward / "node_modules/appium-ios-device").is_dir():
-                    run(["npm", "ci", "--ignore-scripts", "--omit=optional", "--no-audit", "--no-fund"], cwd=forward)
-                    _write_json(forward / "installed.json", {"lock_hash": lock_hash})
-                forward_child = launch(["node", str(forward / "forward.mjs"), config["udid"], str(config["local_port"]), str(config["device_port"])])
-                time.sleep(0.15)
-                if forward_child.poll() is not None:
-                    raise RuntimeError("USB forward failed to start; inspect the log tail.")
-                xcode = launch(manager._build_command(config, "test-without-building"), source)
+                is_simulator = config.get("device_type") == "simulator"
+                if not is_simulator:
+                    forward = manager.state_dir / "runtime/forward"
+                    forward.mkdir(exist_ok=True, mode=0o700)
+                    for name in ("package.json", "package-lock.json", "forward.mjs"):
+                        shutil.copyfile(PLUGIN_ROOT / "tooling" / name, forward / name)
+                        (forward / name).chmod(0o600)
+                    lock_hash = hashlib.sha256((forward / "package-lock.json").read_bytes()).hexdigest()
+                    if _read_json(forward / "installed.json", {}).get("lock_hash") != lock_hash or not (forward / "node_modules/appium-ios-device").is_dir():
+                        run(["npm", "ci", "--ignore-scripts", "--omit=optional", "--no-audit", "--no-fund"], cwd=forward)
+                        _write_json(forward / "installed.json", {"lock_hash": lock_hash})
+                    forward_child = launch(["node", str(forward / "forward.mjs"), config["udid"], str(config["local_port"]), str(config["device_port"])])
+                    time.sleep(0.15)
+                    if forward_child.poll() is not None:
+                        raise RuntimeError("USB forward failed to start; inspect the log tail.")
+                environment = ({**os.environ, "TEST_RUNNER_USE_PORT": str(config["local_port"])}
+                               if is_simulator else None)
+                xcode = launch(manager._build_command(config, "test-without-building"), source, env=environment)
+                workers = (xcode,) if is_simulator else (forward_child, xcode)
                 next_status_probe = 0
-                # Keep both children owned and watch either side fail.
-                while not stopping and all(child.poll() is None for child in (forward_child, xcode)):
+                # Keep all owned processes supervised without affecting other devices.
+                while not stopping and all(child.poll() is None for child in workers):
                     if action == "recover" and job.get("recovery_phase") == "starting" and time.monotonic() >= next_status_probe:
                         # The old listener/group exited before these children
                         # were launched. A ready status now belongs to the new

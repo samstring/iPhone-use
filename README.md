@@ -168,6 +168,19 @@ pua_device(action="list")
 
 其他设备使用不同的别名、UDID 和本机端口。一个 batch 只能操作一台手机，`device` 必须放在 batch 最外层；重配时会拒绝重复 UDID 和端口。
 
+模拟器不需要开发者签名或 USB 转发。先运行 `xcrun simctl list devices available` 获取模拟器 UDID，使用：
+
+```text
+xcrun simctl boot <模拟器UDID>  # 已启动可跳过
+pua_device(action="register", device="sim_a", device_type="simulator", udid="模拟器UDID", local_port=18401)
+pua_setup(action="fetch", device="sim_a")   # 没有 WDA 源码时
+pua_setup(action="build", device="sim_a")
+pua_setup(action="start", device="sim_a")
+pua_ready(device="sim_a", screenshot=false)
+```
+
+模拟器的 WDA 使用本机端口（本地端口与设备端口相同），并复用普通 iPhone 的点击、树、截图与 Session 功能。GitHub Actions 的 `simulator-integration` Job 会自动创建两台临时模拟器，进行双 WDA 控制、并行操作和 A → B → A 验证；不会操作已有真机。
+
 **当前限制**：实时手机屏幕 widget 仍只支持原默认设备，额外设备的 widget 请求会被明确拒绝，避免误显示或误操作。额外设备的控件树、模型截图与手机动作不受此限制。代码测试不能替代双真机验收。
 
 ## 可以做什么
