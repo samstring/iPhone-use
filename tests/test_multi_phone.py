@@ -64,6 +64,18 @@ class MultiPhoneTests(unittest.TestCase):
                 self.runtime.call("pua_observe",{"device":alias})
         self.assertFalse((self.directory/"devices"/"sam"/"config.json").exists())
 
+    def test_reconfigure_cannot_steal_another_devices_udid_or_port(self):
+        self.register("apple","TEST-DEVICE-00001",18101)
+        self.register("sam","TEST-DEVICE-00002",18102)
+        for udid,port in (("TEST-DEVICE-00001",18102),("TEST-DEVICE-00002",18101)):
+            with self.subTest(udid=udid,port=port),self.assertRaises(WDAError) as caught:
+                self.runtime.call("pua_setup",{
+                    "action":"configure","device":"sam","udid":udid,
+                    "team_id":"ABCDE12345","bundle_id":"com.example.wdarunner",
+                    "local_port":port})
+            self.assertEqual(caught.exception.code,"device_conflict")
+        self.assertEqual(self.runtime._context("sam").setup_manager.config["udid"],"TEST-DEVICE-00002")
+
     def test_explicit_target_is_isolated_from_legacy_default(self):
         self.register("apple","TEST-DEVICE-00001",18101)
         apple=self.runtime._context("apple")
