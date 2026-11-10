@@ -146,7 +146,9 @@ class ToolLoadingTests(unittest.TestCase):
                 self.assertFalse(branch["additionalProperties"])
                 arguments = branch["properties"]["args"]
                 self.assertFalse(arguments["additionalProperties"])
-                self.assertEqual(arguments, without_documentation(SCHEMAS[op]))
+                expected=without_documentation(SCHEMAS[op])
+                expected["properties"].pop("device",None)
+                self.assertEqual(arguments,expected)
 
     def test_codex_projection_keeps_references_and_all_operation_fields(self):
         projected = codex_supported_schema(self.batch)
