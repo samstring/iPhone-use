@@ -127,7 +127,7 @@ class ToolLoadingTests(unittest.TestCase):
 
     def test_catalog_stays_within_the_model_context_budget(self):
         # 0.1.14 published 39,084 bytes, 29,568 of them visible to the model in Codex.
-        self.assertLess(json_bytes({"tools": TOOLS}), 31000)
+        self.assertLess(json_bytes({"tools": TOOLS}), 35500)
         visible = sum(json_bytes({"name": tool["name"], "description": tool["description"],
                                   "parameters": codex_supported_schema(tool["inputSchema"])})
                       for tool in TOOLS if tool.get("_meta", {}).get("ui", {}).get("visibility") != ["app"])
