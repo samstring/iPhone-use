@@ -163,11 +163,12 @@ def published_schema(name):
     if name=="find":return source
     brief=name=="batch"
     # Short internal references keep the complete batch contract below 5 KB.
-    refs={"selector":"s" if brief else "selector","observe":"o" if brief else "observe"}
-    counts={"selector":0,"observe":0}
+    refs={"selector":"s" if brief else "selector","observe":"o" if brief else "observe","device":"d" if brief else "device"}
+    counts={"selector":0,"observe":0,"device":0}
     def count(value):
         if value==SEL:counts["selector"]+=1
         elif value==OBS:counts["observe"]+=1
+        elif value==DEVICE_ARG:counts["device"]+=1
         elif isinstance(value,dict):
             for item in value.values():count(item)
         elif isinstance(value,list):
@@ -177,11 +178,12 @@ def published_schema(name):
     def publish(value):
         if value==SEL:return {"$ref":"#/$defs/"+refs["selector"]} if "selector" in shared else (undocumented(SEL) if brief else SEL_BRIEF)
         if value==OBS:return {"$ref":"#/$defs/"+refs["observe"]} if "observe" in shared else (undocumented(OBS) if brief else OBS_BRIEF)
+        if value==DEVICE_ARG:return {"$ref":"#/$defs/"+refs["device"]} if "device" in shared else (undocumented(DEVICE_ARG) if brief else DEVICE_ARG)
         if isinstance(value,dict):return {k:publish(v) for k,v in value.items() if not (brief and k in ("description","examples"))}
         if isinstance(value,list):return [publish(v) for v in value]
         return value
     schema=publish(source)
-    definitions={"selector":undocumented(SEL) if brief else SEL_BRIEF,"observe":undocumented(OBS) if brief else OBS_BRIEF}
+    definitions={"selector":undocumented(SEL) if brief else SEL_BRIEF,"observe":undocumented(OBS) if brief else OBS_BRIEF,"device":undocumented(DEVICE_ARG) if brief else DEVICE_ARG}
     if shared:schema["$defs"]={refs[key]:definitions[key] for key in sorted(shared)}
     return schema
 
