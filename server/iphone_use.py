@@ -93,6 +93,10 @@ SCHEMAS={
 # Each batch operation carries the same closed argument schema as its standalone tool.
 BATCH_OPS=["tap","swipe","type_text","launch_app","press_button","wait","observe","scroll_find"]
 SCHEMAS["batch"]=obj({"steps":{"type":"array","minItems":1,"maxItems":20,"items":{"oneOf":[obj({"op":{"type":"string","const":op},"args":SCHEMAS[op]},("op","args")) for op in BATCH_OPS]}}},("steps",))
+# Keep batch steps device-free: a batch belongs to exactly one phone.
+for _branch in SCHEMAS["batch"]["properties"]["steps"]["items"]["oneOf"]:
+    _arg_schema=_branch["properties"]["args"]
+    _branch["properties"]["args"]={**_arg_schema,"properties":dict(_arg_schema["properties"])}
 SCHEMAS["device"]=obj({
  "action":string("List or register independently configured phones.",enum=["list","register"]),
  "device":string("Unique device alias.",max_length=32),
