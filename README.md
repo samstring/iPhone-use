@@ -149,6 +149,27 @@ sh scripts/install.sh
 
 技能引导 Codex 完成诊断、设备发现、签名配置、获取 WDA、后台构建与启动。已配置过的设备会复用配置和构建，正常任务不需要每次重装。`pua_ready` 返回 `ready=true` 后才开始手机任务。
 
+## 多台 iPhone（实验性）
+
+一个 MCP 服务可以管理多台设备。新增设备使用独立的 WDA 端口、状态目录、构建缓存、Session、操作锁和恢复任务。所有手机工具支持顶层 `device` 参数；省略时始终使用原有默认设备，避免跨聊天误切换。
+
+先用 `pua_setup(action="discover")` 获取实际 UDID，再注册设备。以下端口仅为示例，必须确保未占用：
+
+```text
+pua_device(action="register", device="apple", udid="真实UDID", team_id="实际TeamID", bundle_id="可签名BundleID", local_port=18101)
+pua_setup(action="fetch", device="apple")  # WDA 尚未下载时
+pua_setup(action="build", device="apple")
+pua_setup(action="start", device="apple")
+pua_ready(device="apple", screenshot=false)
+pua_observe(device="apple", mode="tree")
+pua_tap(device="apple", x=100, y=200)
+pua_device(action="list")
+```
+
+其他设备使用不同的别名、UDID 和本机端口。一个 batch 只能操作一台手机，`device` 必须放在 batch 最外层；重配时会拒绝重复 UDID 和端口。
+
+**当前限制**：实时手机屏幕 widget 仍只支持原默认设备，额外设备的 widget 请求会被明确拒绝，避免误显示或误操作。额外设备的控件树、模型截图与手机动作不受此限制。代码测试不能替代双真机验收。
+
 ## 可以做什么
 
 | 功能 | 示例 |
