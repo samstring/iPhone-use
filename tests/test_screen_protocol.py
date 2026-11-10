@@ -129,7 +129,7 @@ class ScreenProtocolTests(unittest.TestCase):
         ])
         self.assertIn("resources", responses[0]["result"]["capabilities"])
         tools = {item["name"]: item for item in responses[1]["result"]["tools"]}
-        self.assertEqual(len(tools), 20)
+        self.assertEqual(len(tools), 21)
         for name in ("pua_ready", "pua_screen"):
             self.assertEqual(tools[name]["_meta"]["ui"]["resourceUri"], SCREEN_URI)
         self.assertEqual(tools["pua_screen"]["_meta"]["openai/ui"]["entrypoints"], [{"type": "thread"}])
