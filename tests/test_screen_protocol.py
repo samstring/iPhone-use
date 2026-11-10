@@ -140,7 +140,7 @@ class ScreenProtocolTests(unittest.TestCase):
         self.assertFalse(tools["pua_screen_action"]["annotations"]["idempotentHint"])
         visible = [item for item in tools.values()
                    if item.get("_meta", {}).get("ui", {}).get("visibility") != ["app"]]
-        self.assertEqual(len(visible), 18)
+        self.assertEqual(len(visible), 19)
         self.assertTrue(tools["pua_screen_frame"]["annotations"]["readOnlyHint"])
 
     def test_stdio_serves_packaged_widget_without_connecting_to_wda(self):
