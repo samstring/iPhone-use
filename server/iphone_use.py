@@ -101,8 +101,6 @@ SCHEMAS["device"]=obj({
  "device_port":num(1024,65535,"integer"),"source_dir":string(max_length=4096)
 },("action",))
 DEVICE_ARG=string("Configured device alias; omit for legacy default phone.",max_length=32)
-for _tool,_schema in SCHEMAS.items():
-    if _tool!="device":_schema["properties"]["device"]=DEVICE_ARG
 SCHEMAS["ready"]["examples"]=[{"recover":True,"screenshot":False}]
 SCHEMAS["screen"]=obj({"action":string("Default open displays the live iPhone sidebar. Pause before password/Face ID takeover; resume only after the user confirms completion.",enum=["open","pause","resume"])})
 SCHEMAS["screen_frame"]=obj({"after_seq":num(0,9007199254740991,"integer"),"last_event_id":num(0,9007199254740991,"integer")})
@@ -111,6 +109,8 @@ SCHEMAS["screen_action"]=obj({
  "x":num(0,10000),"y":num(0,10000),"to_x":num(0,10000),"to_y":num(0,10000),
  "width":num(1,10000),"height":num(1,10000),"duration":num(.05,1)
 },("action",))
+for _tool,_schema in SCHEMAS.items():
+    if _tool!="device":_schema["properties"]["device"]=DEVICE_ARG
 # Tools the preview App calls itself; the model never sees them.
 APP_TOOLS=("screen_frame","screen_action")
 DESCRIPTIONS={
@@ -924,7 +924,7 @@ def serve(runtime):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--state-dir");parser.add_argument("--url");parser.add_argument("--doctor",action="store_true");parser.add_argument("--ready",action="store_true")
-    args=parser.parse_args();runtime=MultiPhoneRuntime(args.state_dir,args.url)
+    args=parser.parse_args();runtime=Runtime(args.state_dir,args.url) if (args.doctor or args.ready) else MultiPhoneRuntime(args.state_dir,args.url)
     try:
         if args.doctor or args.ready:
             try:data=runtime.call("pua_doctor" if args.doctor else "pua_ready",{})
