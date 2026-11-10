@@ -93,6 +93,16 @@ SCHEMAS={
 # Each batch operation carries the same closed argument schema as its standalone tool.
 BATCH_OPS=["tap","swipe","type_text","launch_app","press_button","wait","observe","scroll_find"]
 SCHEMAS["batch"]=obj({"steps":{"type":"array","minItems":1,"maxItems":20,"items":{"oneOf":[obj({"op":{"type":"string","const":op},"args":SCHEMAS[op]},("op","args")) for op in BATCH_OPS]}}},("steps",))
+SCHEMAS["device"]=obj({
+ "action":string("List or register independently configured phones.",enum=["list","register"]),
+ "device":string("Unique device alias.",max_length=32),
+ "udid":string(max_length=64),"team_id":string(max_length=10),
+ "bundle_id":string(max_length=160),"local_port":num(1024,65535,"integer"),
+ "device_port":num(1024,65535,"integer"),"source_dir":string(max_length=4096)
+},("action",))
+DEVICE_ARG=string("Configured device alias; omit for legacy default phone.",max_length=32)
+for _tool,_schema in SCHEMAS.items():
+    if _tool!="device":_schema["properties"]["device"]=DEVICE_ARG
 SCHEMAS["ready"]["examples"]=[{"recover":True,"screenshot":False}]
 SCHEMAS["screen"]=obj({"action":string("Default open displays the live iPhone sidebar. Pause before password/Face ID takeover; resume only after the user confirms completion.",enum=["open","pause","resume"])})
 SCHEMAS["screen_frame"]=obj({"after_seq":num(0,9007199254740991,"integer"),"last_event_id":num(0,9007199254740991,"integer")})
@@ -105,6 +115,7 @@ SCHEMAS["screen_action"]=obj({
 APP_TOOLS=("screen_frame","screen_action")
 DESCRIPTIONS={
  "doctor":"Diagnose local Xcode, USB devices, signing prerequisites and PUA health without changing the phone. Start here for setup.",
+ "device":"List configured phones or register an isolated phone alias, UDID, signing and local WDA port. Other tools accept device=alias. The preview widget remains limited to the original default phone.",
  "setup":"First phone use in this chat: call setup(status) directly before READY; reuse an active start/recovery job, or start once with the existing config/build only if the service is confirmed stopped. Start waits up to 20 seconds for service readiness; if pending, query status with the same job_id and wait_seconds=20. Then READY. Missing config/source/build uses iphone-use-setup. No blanket reinstall or extra approval for authorized startup; honor no-restart instructions. Never uninstalls apps.",
  "ready":"First use: setup(status), reuse/start and wait, then READY (recover=true); only ready=true permits phone tasks. Reuse the healthy channel. pua_timeout: bounded host wait then READY again, not immediate setup/restart. pua_unreachable/not_ready: setup, not task failure. recover=true handles owned runtime faults, not cold startup. Follow recovering/recovery_required guidance. Never replay phone actions.",
  "observe":"Fresh phone tree/screenshot, point viewport and contextual observation_id. Nodes are not proven hittable. Native snapshot limits are opt-in and incomplete, not visible-only. Image pixels x image.pixel_to_point = iPhone points.",
@@ -244,7 +255,9 @@ def validate_semantics(name,args):
         if any(c in args["text"] for c in ("\n","\r")) and not args.get("allow_newlines",False):raise WDAError("newline_requires_intent","Line breaks require explicit multiline intent.")
     if name=="launch_app" and not re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+",args["bundle_id"]):raise WDAError("invalid_argument","Use the app's verified bundle ID.")
     if name=="batch":
-        for step in args["steps"]:validate_semantics(step["op"],step["args"])
+        for step in args["steps"]:
+            if "device" in step["args"]:raise WDAError("invalid_argument","Specify device on pua_batch, not on individual steps.",details={"action_executed":False})
+            validate_semantics(step["op"],step["args"])
 
 
 def copy_png(directory,data):
@@ -318,6 +331,7 @@ class Runtime:
         # sharing this runtime, and share only this plugin's session identity.
         if not isinstance(name,str) or not name.startswith("pua_") or name[4:] not in SCHEMAS:raise WDAError("unknown_tool","Unknown PUA tool.")
         validate(args,SCHEMAS[name[4:]]);validate_semantics(name[4:],args)
+        if "device" in args or name=="pua_device":raise WDAError("device_route_required","Use the multi-phone MCP entrypoint; no device action was executed.",details={"action_executed":False})
         if name in ("pua_screen","pua_screen_frame","pua_screen_action"):self.identify_device()
         # Cached preview polling does not share the PUA action/session lock.
         if name=="pua_screen_frame":return self.screen.frame(**args)
@@ -670,7 +684,7 @@ def tool_result(runtime,params):
         # The preview App reads structuredContent; frames never become model text.
         if name=="pua_screen_frame":return {"content":[],"structuredContent":data,"isError":False}
         result=result_content(data,structured=name in ("pua_screen","pua_screen_action"))
-        if name in ("pua_ready","pua_screen"):
+        if name in ("pua_ready","pua_screen") and (not hasattr(runtime,"preview_enabled") or runtime.preview_enabled(params.get("arguments",{}))):
             result["_meta"]={"openai/widgetSessionId":SCREEN_SESSION_ID}
         return result
     except WDAError as exc:return result_content({"error":exc.as_dict()},structured=name=="pua_screen_action")
@@ -783,7 +797,7 @@ def serve(runtime):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument("--state-dir");parser.add_argument("--url");parser.add_argument("--doctor",action="store_true");parser.add_argument("--ready",action="store_true")
-    args=parser.parse_args();runtime=Runtime(args.state_dir,args.url)
+    args=parser.parse_args();runtime=MultiPhoneRuntime(args.state_dir,args.url)
     try:
         if args.doctor or args.ready:
             try:data=runtime.call("pua_doctor" if args.doctor else "pua_ready",{})
