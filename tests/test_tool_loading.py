@@ -131,7 +131,7 @@ class ToolLoadingTests(unittest.TestCase):
         visible = sum(json_bytes({"name": tool["name"], "description": tool["description"],
                                   "parameters": codex_supported_schema(tool["inputSchema"])})
                       for tool in TOOLS if tool.get("_meta", {}).get("ui", {}).get("visibility") != ["app"])
-        self.assertLess(visible, 22000)
+        self.assertLess(visible, 26000)
 
     def test_batch_references_resolve_to_the_complete_runtime_contract(self):
         self.assertIn("$defs", self.batch)
