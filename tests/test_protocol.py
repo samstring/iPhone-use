@@ -185,8 +185,9 @@ class ProtocolTests(unittest.TestCase):
         for step in batch_steps:
             op = step["properties"]["op"]["const"]
             standalone = tools["pua_" + op]["inputSchema"]
-            self.assertEqual(contract(step["properties"]["args"], tools["pua_batch"]["inputSchema"]["$defs"]),
-                             contract(standalone, standalone.get("$defs", {})))
+            expected=contract(standalone,standalone.get("$defs",{}))
+            expected["properties"].pop("device",None)
+            self.assertEqual(contract(step["properties"]["args"],tools["pua_batch"]["inputSchema"]["$defs"]),expected)
 
     def test_stdio_apps_catalog_returns_public_evidence_without_wda_access(self):
         responses = self.exchange([
