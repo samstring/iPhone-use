@@ -768,8 +768,23 @@ class MultiPhoneRuntime(Runtime):
         if name in ("pua_screen","pua_screen_frame","pua_screen_action") and alias!="default":
             raise WDAError("preview_not_supported","The live preview widget is currently bound to the default phone. Control and observe other phones with device=alias.",details={"action_executed":False})
         clean={key:value for key,value in args.items() if key!="device"}
-        if alias=="default":return super().call(name,clean)
-        return self._context(alias).call(name,clean)
+        target=self._context(alias)
+        # Reconfiguration is serialized with registrations across MCP processes.
+        if name=="pua_setup" and clean.get("action")=="configure":
+            from urllib.parse import urlsplit
+            port=clean.get("local_port",urlsplit(target.base_url).port or 18100)
+            lock_path=self.state_dir/".device-registry.lock"
+            with lock_path.open("a") as handle:
+                lock_path.chmod(0o600)
+                fcntl.flock(handle,fcntl.LOCK_EX)
+                for other,config in self._configs():
+                    if other==alias:continue
+                    if clean.get("udid")==config.get("udid") or port==config.get("local_port"):
+                        raise WDAError("device_conflict","This UDID or local port is already assigned to "+other+".",details={"action_executed":False})
+                if alias!="default" and port==(urlsplit(self.base_url).port or 18100):
+                    raise WDAError("port_in_use","Port is reserved by the default phone.",details={"action_executed":False})
+                return Runtime.call(self,name,clean) if alias=="default" else target.call(name,clean)
+        return Runtime.call(self,name,clean) if alias=="default" else target.call(name,clean)
 
     def preview_enabled(self,args):
         return isinstance(args,dict) and args.get("device","default")=="default"
